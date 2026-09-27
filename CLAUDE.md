@@ -1,0 +1,134 @@
+# nlmixr2lib — Claude project notes
+
+This file gives AI coding assistants a fast orientation to the
+repository. Human contributors should read
+`vignettes/create-model-library.Rmd` for the full conventions and the
+README for a project overview.
+
+## What this package is
+
+`nlmixr2lib` is a model library for `nlmixr2`. It ships curated
+pharmacometric models (PK, PD, endogenous, therapeutic-area-specific)
+that users can load by name and combine or modify.
+
+## Layout highlights
+
+- `inst/modeldb/` — every distributed model, organized by category
+  (`specificDrugs/`, `endogenous/`, `pharmacokinetics/`,
+  `pharmacodynamics/`, `therapeuticArea/`). The function name inside
+  each `.R` file must match the filename.
+- `R/modeldb.R` — the registry-building machinery (`buildModelDb()`,
+  [`readModelDb()`](https://nlmixr2.github.io/nlmixr2lib/reference/readModelDb.md),
+  [`modellib()`](https://nlmixr2.github.io/nlmixr2lib/reference/modellib.md)).
+- `vignettes/` — validation vignettes, one per published model.
+- `vignettes/create-model-library.Rmd` — the canonical naming
+  conventions document.
+
+## Skills
+
+Repo-scoped skills live under `.claude/skills/`:
+
+- **`extract-literature-model`** — guided workflow for extracting a
+  pharmacometric model from a scientific source (journal article,
+  supplement, poster, regulatory document) into the package. Use when a
+  user provides a paper and asks to add the model. See
+  `.claude/skills/extract-literature-model/SKILL.md`.
+
+The skill’s `references/` folder contains the templates and standards it
+enforces. The authoritative covariate-column register is
+`inst/references/covariate-columns.md` — consult it before introducing
+any new covariate column. The register is installed with the package so
+[`checkModelConventions()`](https://nlmixr2.github.io/nlmixr2lib/reference/checkModelConventions.md)
+can parse it at runtime; update the file (not R code) when ratifying a
+new canonical covariate.
+
+## Conventions (quick reference)
+
+For full details see `vignettes/create-model-library.Rmd` and
+`.claude/skills/extract-literature-model/references/naming-conventions.md`.
+
+- Compartments: `depot`, `central`, `peripheral1`, `peripheral2`,
+  `effect`. Observation: `Cc`.
+- PK parameters (log-scale): `lka`, `lcl`, `lvc`, `lvp`, `lq`,
+  `lfdepot`; derived `ka`, `cl`, `vc`, `vp`, `q`, `kel`, `k12`, etc.
+- IIV: `eta` + transformed name (`etalcl`, `etalvc`). Use `etalcl` even
+  when the paper used `etacl`.
+- Residual error: `propSd`, `addSd`; multi-output prefixes with the
+  output (`CcpropSd`).
+- Covariate columns: canonical names in
+  `inst/references/covariate-columns.md`. Standardized choices include
+  `SEXF` (1 = female), `ADA_POS` (1 = ADA-positive), and a
+  `RACE_<GROUP>` prefix for race indicators.
+
+## Git workflow
+
+- Never push directly to `main`. Always branch and open a PR.
+- Before regenerating `data/modeldb.rda` / `inst/modeldb.qs2`, sync with
+  `origin/main` so upstream additions aren’t clobbered.
+- `nlmixr2lib::buildModelDb()` regenerates the registry; commit the
+  regenerated artifacts alongside the model file and vignette.
+
+## Formatting
+
+- R code is formatted with [air](https://posit-dev.github.io/air/) using
+  `air.toml`; the `format-check` CI job runs `air format --check`. Run
+  `air format .` (or on the files you touched) before committing.
+  Install the pinned version with
+  `curl -LsSf https://github.com/posit-dev/air/releases/download/0.11.0/air-installer.sh | sh`.
+- `air.toml` skips `ini()`, `model()`, `rxode2()` and `modelExtract()`,
+  so the `lcl <- 1; label("...")` and `d/dt(central)` idioms are left as
+  written.
+- `.lintr` is based on rxode2’s rules (nlmixr2lib keeps its opt-outs for
+  naming, object usage, commented code and indentation), with
+  `semicolon_linter(allow_compound = TRUE)` and `/` excluded from
+  `infix_spaces_linter` for the same idioms.
+
+## Testing
+
+- `devtools::check()` must pass. Model files are validated via
+  `buildModelDb()` (filename ↔︎ function-name match, parseable `ini()` /
+  `model()`).
+- Vignettes must build cleanly; they use `PKNCA` (in `Suggests`) for NCA
+  validation.
+
+## Vignette assertions over a simulated cohort
+
+`stopifnot(all(x <= C))` / `max(x) < C`, where `x` is one value per
+simulated subject and `C` was chosen from the extreme observed while
+authoring, is the single most common way a vignette passes locally and
+then fails CI. It has cost this repo three CI rounds at ~75 min each.
+
+The reason is that the extreme of a random cohort is not reproducible
+across rxode2 builds. Vignettes call
+[`rxode2::rxSetSeed()`](https://nlmixr2.github.io/rxode2/reference/rxSetSeed.html)
+for common random numbers, which fixes the draw *within* an rxode2
+version but not *across* versions — CI resolves rxode2 from CRAN while a
+developer may have a newer r-universe build. Measured on
+`Zhang_2026_tebipenem`: the per-subject minimum was 0.876 on rxode2
+5.1.7 and below 0.80 on 5.1.6, purely from which subjects sampled a long
+absorption lag.
+
+So assert on the **centre** and on **robust quantiles**, never on the
+extremes:
+
+``` r
+
+stopifnot(
+  # Structural: a mis-transcribed clearance, dose or unit moves the whole
+  # distribution by tens of percent and blows this instantly.
+  abs(median(chk$pct_diff)) < 5,
+  # Envelope: robust to which subjects land in the tails.
+  quantile(abs(chk$pct_diff), 0.9) < 15
+)
+```
+
+This applies when the two sides being compared differ by a *physical*
+mechanism that varies per subject — an absorption lag, a
+Michaelis-Menten arm, trapezoidal error on a narrow peak. It does
+**not** apply to a check whose two sides use the same drawn parameters
+(a solve against its own closed form), where the difference is pure
+numerical error and a tight [`all()`](https://rdrr.io/r/base/all.html)
+bound is correct and should be kept.
+
+Worked examples: `deVries_2025_durvalumab.Rmd` and
+`Zhang_2026_tebipenem.Rmd`, both of which carry the reasoning inline.
